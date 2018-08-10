@@ -1,5 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -13,19 +12,19 @@ namespace Sodium.Tests
         public void RunConstruct()
         {
             List<int> @out = new List<int>();
-            ValueTuple<StreamSink<int>, IListener> t = Transaction.RunConstruct(() =>
+            (StreamSink<int> s, IListener l) = Transaction.Run(() =>
             {
                 StreamSink<int> sink = Stream.CreateSink<int>();
                 sink.Send(4);
-                Stream<int> s = sink.Map(v => v * 2);
-                IListener l = s.Listen(@out.Add);
-                return ValueTuple.Create(sink, l);
+                Stream<int> sLocal = sink.Map(v => v * 2);
+                IListener lLocal = sLocal.Listen(@out.Add);
+                return (sink, lLocal);
             });
-            t.Item1.Send(5);
-            t.Item1.Send(6);
-            t.Item1.Send(7);
-            t.Item2.Unlisten();
-            t.Item1.Send(8);
+            s.Send(5);
+            s.Send(6);
+            s.Send(7);
+            l.Unlisten();
+            s.Send(8);
 
             CollectionAssert.AreEqual(new[] { 8, 10, 12, 14 }, @out);
         }
@@ -35,7 +34,7 @@ namespace Sodium.Tests
         {
             List<int> @out = new List<int>();
             StreamSink<int> sink = Stream.CreateSink<int>();
-            Task<IListener> t = Task.Run(() => Transaction.RunConstruct(() =>
+            Task<IListener> t = Task.Run(() => Transaction.Run(() =>
             {
                 Thread.Sleep(500);
                 sink.Send(4);
@@ -44,15 +43,16 @@ namespace Sodium.Tests
                 Thread.Sleep(500);
                 return l2;
             }));
+            await Task.Delay(250);
             sink.Send(5);
-            await Task.Delay(750);
+            await Task.Delay(500);
             sink.Send(6);
             IListener l = await t;
             sink.Send(7);
             l.Unlisten();
             sink.Send(8);
 
-            CollectionAssert.AreEqual(new[] { 8, 14 }, @out);
+            CollectionAssert.AreEqual(new[] { 8, 12, 14 }, @out);
         }
 
         [Test]
@@ -60,40 +60,59 @@ namespace Sodium.Tests
         {
             List<int> @out = new List<int>();
             StreamSink<int> sink = Stream.CreateSink<int>();
-            Task<IListener> t = Task.Run(() => Transaction.RunConstruct(() =>
+            Task<IListener> t = Task.Run(() => Transaction.Run(() =>
             {
                 Thread.Sleep(500);
                 sink.Send(4);
-                //Stream<int> s = Transaction.RunConstruct(() => sink.Map(v => v * 2));
-                Stream<int> s = sink.Map(v => v * 2);
+                Stream<int> s = Transaction.Run(() => sink.Map(v => v * 2));
                 IListener l2 = s.Listen(@out.Add);
                 Thread.Sleep(500);
                 return l2;
             }));
+            await Task.Delay(250);
             sink.Send(5);
-            await Task.Delay(750);
+            await Task.Delay(500);
             sink.Send(6);
             IListener l = await t;
             sink.Send(7);
             l.Unlisten();
             sink.Send(8);
 
-            CollectionAssert.AreEqual(new[] { 8, 14 }, @out);
+            CollectionAssert.AreEqual(new[] { 8, 12, 14 }, @out);
         }
 
         [Test]
         public void Post()
         {
-            DiscreteCell<int> cell = Transaction.Run(() =>
+            Cell<int> cell = Transaction.Run(() =>
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
                 return s.Hold(1);
             });
             int value = 0;
-            Transaction.Post(() => value = cell.Cell.Sample());
+            Transaction.Post(() => value = cell.Sample());
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
+        }
+
+        [Test]
+        public void NestedPost()
+        {
+            Cell<int> cell = Transaction.Run(() =>
+            {
+                StreamSink<int> s = Stream.CreateSink<int>();
+                s.Send(2);
+                Transaction.Post(() =>
+                {
+                    s.Send(3);
+                    Transaction.Post(() => s.Send(5));
+                });
+                Transaction.Post(() => s.Send(4));
+                return s.Hold(1);
+            });
+
+            Assert.AreEqual(5, cell.Sample());
         }
 
         [Test]
@@ -104,12 +123,12 @@ namespace Sodium.Tests
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
-                DiscreteCell<int> c = s.Hold(1);
-                Transaction.Post(() => value = c.Cell.Sample());
-                Assert.AreEqual(value, 0);
+                Cell<int> c = s.Hold(1);
+                Transaction.Post(() => value = c.Sample());
+                Assert.AreEqual(0, value);
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
         }
 
         [Test]
@@ -122,13 +141,13 @@ namespace Sodium.Tests
                 s.Send(2);
                 Transaction.RunVoid(() =>
                 {
-                    DiscreteCell<int> c = s.Hold(1);
-                    Transaction.Post(() => value = c.Cell.Sample());
+                    Cell<int> c = s.Hold(1);
+                    Transaction.Post(() => value = c.Sample());
                 });
-                Assert.AreEqual(value, 0);
+                Assert.AreEqual(0, value);
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
         }
 
         [Test]
@@ -139,74 +158,130 @@ namespace Sodium.Tests
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
-                Transaction.RunConstruct(() =>
+                Transaction.Run(() =>
                 {
-                    DiscreteCell<int> c = s.Hold(1);
-                    Transaction.Post(() => value = c.Cell.Sample());
+                    Cell<int> c = s.Hold(1);
+                    Transaction.Post(() => value = c.Sample());
                     return Unit.Value;
                 });
-                Assert.AreEqual(value, 0);
+                Assert.AreEqual(0, value);
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
         }
 
         [Test]
         public void PostInConstructTransaction()
         {
             int value = 0;
-            Transaction.RunConstruct(() =>
+            Transaction.Run(() =>
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
-                DiscreteCell<int> c = s.Hold(1);
-                Transaction.Post(() => value = c.Cell.Sample());
-                Assert.AreEqual(value, 0);
+                Cell<int> c = s.Hold(1);
+                Transaction.Post(() => value = c.Sample());
+                Assert.AreEqual(0, value);
                 return Unit.Value;
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
         }
 
         [Test]
         public void PostInNestedConstructTransaction()
         {
             int value = 0;
-            Transaction.RunConstruct(() =>
+            Transaction.Run(() =>
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
                 Transaction.RunVoid(() =>
                 {
-                    DiscreteCell<int> c = s.Hold(1);
-                    Transaction.Post(() => value = c.Cell.Sample());
+                    Cell<int> c = s.Hold(1);
+                    Transaction.Post(() => value = c.Sample());
                 });
-                Assert.AreEqual(value, 0);
+                Assert.AreEqual(0, value);
                 return Unit.Value;
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
         }
 
         [Test]
         public void PostInNestedConstructTransaction2()
         {
             int value = 0;
-            Transaction.RunConstruct(() =>
+            Transaction.Run(() =>
             {
                 StreamSink<int> s = Stream.CreateSink<int>();
                 s.Send(2);
-                Transaction.RunConstruct(() =>
+                Transaction.Run(() =>
                 {
-                    DiscreteCell<int> c = s.Hold(1);
-                    Transaction.Post(() => value = c.Cell.Sample());
+                    Cell<int> c = s.Hold(1);
+                    Transaction.Post(() => value = c.Sample());
                     return Unit.Value;
                 });
-                Assert.AreEqual(value, 0);
+                Assert.AreEqual(0, value);
                 return Unit.Value;
             });
 
-            Assert.AreEqual(value, 2);
+            Assert.AreEqual(2, value);
+        }
+
+        [Test]
+        public void IsActive()
+        {
+            bool isActive = Transaction.Run(Transaction.IsActive);
+
+            Assert.IsTrue(isActive);
+        }
+
+        [Test]
+        public void IsNotActive()
+        {
+            bool isActive = Transaction.IsActive();
+
+            Assert.IsFalse(isActive);
+        }
+
+        [Test]
+        public void IsNotActiveSeparateThread()
+        {
+            bool? threadIsActive1 = null;
+            bool? threadIsActive2 = null;
+            bool? threadIsActive3 = null;
+            bool? threadIsActive4 = null;
+            bool? threadIsActive5 = null;
+            new Thread(() =>
+            {
+                threadIsActive1 = Transaction.IsActive();
+                Thread.Sleep(500);
+                threadIsActive2 = Transaction.IsActive();
+                Transaction.RunVoid(() =>
+                {
+                    threadIsActive3 = Transaction.IsActive();
+                    Thread.Sleep(500);
+                    threadIsActive4 = Transaction.IsActive();
+                });
+                threadIsActive5 = Transaction.IsActive();
+            }).Start();
+
+            Thread.Sleep(250);
+            bool isActive1 = Transaction.IsActive();
+            Thread.Sleep(500);
+            bool isActive2 = Transaction.IsActive();
+            Thread.Sleep(500);
+            bool isActive3 = Transaction.IsActive();
+
+            Assert.IsFalse(isActive1);
+            Assert.IsFalse(isActive2);
+            Assert.IsFalse(isActive3);
+
+            Assert.IsFalse(threadIsActive1);
+            Assert.IsFalse(threadIsActive2);
+            Assert.IsTrue(threadIsActive3);
+            Assert.IsTrue(threadIsActive4);
+            Assert.IsFalse(threadIsActive5);
         }
     }
 }

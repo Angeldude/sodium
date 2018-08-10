@@ -31,13 +31,13 @@ namespace Shared
             return this.A * x * x + this.B * x + this.C;
         }
 
-        public IMaybe<double> When(double x)
+        public Maybe<double> When(double x)
         {
             double c = this.C - x;
             if (IsCloseTo(this.A, 0))
             {
                 double t = -c / this.B;
-                return t >= Quantum ? Maybe.Just(t + this.T0) : Maybe.Nothing<double>();
+                return t >= Quantum ? Maybe.Some(t + this.T0) : Maybe.None;
             }
 
             // ReSharper disable once InconsistentNaming
@@ -45,10 +45,12 @@ namespace Shared
             double t1 = (-this.B + b24ac) / (2 * this.A);
             double t2 = (-this.B - b24ac) / (2 * this.A);
             return t1 >= Quantum
-                ? t2 >= Quantum ? Maybe.Just((t1 < t2 ? t1 : t2) + this.T0)
-                    : Maybe.Just(t1 + this.T0)
-                : t2 >= Quantum ? Maybe.Just(t2 + this.T0)
-                    : Maybe.Nothing<double>();
+                ? t2 >= Quantum
+                    ? Maybe.Some((t1 < t2 ? t1 : t2) + this.T0)
+                    : Maybe.Some(t1 + this.T0)
+                : t2 >= Quantum
+                    ? Maybe.Some(t2 + this.T0)
+                    : Maybe.None;
         }
 
         public Signal Integrate(double initial)
@@ -61,10 +63,10 @@ namespace Shared
             return new Signal(this.T0, this.B / 2, this.C, initial);
         }
 
-        public static DiscreteCell<Signal> Integrate(DiscreteCell<Signal> sig, double initial)
+        public static Cell<Signal> Integrate(Cell<Signal> sig, double initial)
         {
             Stream<Signal> sSig = sig.Updates;
-            return sSig.Accum(sig.Cell.Sample().Integrate(initial), (n, o) => n.Integrate(o.ValueAt(n.T0)));
+            return sSig.Accum(sig.Sample().Integrate(initial), (n, o) => n.Integrate(o.ValueAt(n.T0)));
         }
     }
 }

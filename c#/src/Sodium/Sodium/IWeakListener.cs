@@ -1,10 +1,10 @@
-namespace Sodium
+﻿namespace Sodium
 {
     /// <summary>
-    ///     An interface representing an stream event listener which does not keep the stream from being garbage collected.  This may be used to stop listening on a stream by calling <see cref="Unlisten" />.
+    ///     An interface representing an stream event listener.  This may be used to stop listening on a stream by calling
+    ///     <see cref="IListener.Unlisten" />.
     /// </summary>
-    public interface IWeakListener
+    public interface IWeakListener : IListener
     {
-        void Unlisten();
     }
 }

@@ -17,10 +17,7 @@ namespace Sodium
         {
         }
 
-        protected Node(long rank)
-        {
-            this.Rank = rank;
-        }
+        protected Node(long rank) => this.Rank = rank;
 
         protected static bool EnsureBiggerThan(Node node, long limit)
         {
@@ -41,9 +38,15 @@ namespace Sodium
             return true;
         }
 
+        // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
         private static void EnsureBiggerThanRecursive(Node originalNode, Node node, long limit)
         {
-            if (node.Rank > limit || ReferenceEquals(originalNode, node))
+            if (ReferenceEquals(originalNode, node))
+            {
+                throw new Exception("A dependency cycle was detected.");
+            }
+
+            if (node.Rank > limit)
             {
                 return;
             }
@@ -89,21 +92,18 @@ namespace Sodium
         /// <summary>
         ///     Link an action and a target node to this node.
         /// </summary>
+        /// <param name="trans">The current transaction.</param>
         /// <param name="action">The action to link to this node.</param>
         /// <param name="target">The target node to link to this node.</param>
         /// <returns>
         ///     A tuple containing whether or not changes were made to the node rank
         ///     and the <see cref="Target" /> object created for this link.
         /// </returns>
-        internal ValueTuple<bool, Target> Link(Transaction trans, Action<Transaction, T> action, Node target)
+        internal (bool Changed, Target Target) Link(Transaction trans, Action<Transaction, T> action, Node target)
         {
             bool changed;
-            lock (NodeRanksLock)
-            {
-                changed = EnsureBiggerThan(target, this.Rank);
-            }
-            Target t = new Target(action, target, !trans.IsConstructing || trans.ReachedClose);
-            if (trans.IsConstructing && !trans.ReachedClose)
+            Target t = new Target(action, target, trans.ActivatedTargets);
+            if (!trans.ActivatedTargets)
             {
                 trans.TargetsToActivate.Add(t);
             }
@@ -112,7 +112,11 @@ namespace Sodium
                 this.listeners.Add(t);
                 this.listenersCapacity++;
             }
-            return ValueTuple.Create(changed, t);
+            lock (NodeRanksLock)
+            {
+                changed = EnsureBiggerThan(target, this.Rank);
+            }
+            return (Changed: changed, Target: t);
         }
 
         internal void Unlink(Target target)
@@ -125,10 +129,7 @@ namespace Sodium
             public readonly WeakReference<Action<Transaction, T>> Action;
 
             public Target(Action<Transaction, T> action, Node node, bool isActivated)
-                : base(node, isActivated)
-            {
-                this.Action = new WeakReference<Action<Transaction, T>>(action);
-            }
+                : base(node, isActivated) => this.Action = new WeakReference<Action<Transaction, T>>(action);
         }
 
         internal IReadOnlyList<Target> GetListenersCopy()

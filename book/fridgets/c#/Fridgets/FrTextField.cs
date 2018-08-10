@@ -9,48 +9,46 @@ namespace Fridgets
     public class FrTextField : Fridget
     {
         public FrTextField(string initText)
-            : this(initText, new DiscreteCellLoop<string>())
+            : this(initText, new CellLoop<string>())
         {
         }
 
-        private FrTextField(string initText, DiscreteCellLoop<string> text)
+        private FrTextField(string initText, CellLoop<string> text)
             : base((size, sMouse, sKey, focus, idSupply) =>
             {
                 Stream<double> sPressed = sMouse.Snapshot(size, (e, mSize) =>
-                    mSize.Match(
+                    mSize.Bind(
                         s =>
                         {
                             MouseButtonEventArgs b = e.Args as MouseButtonEventArgs;
                             Point p = e.GetPosition();
                             return b != null && b.ChangedButton == MouseButton.Left && b.ButtonState == MouseButtonState.Pressed
                                    && p.X >= 2 && p.X < s.Width - 2 && p.Y >= 2 && p.Y < s.Height - 2
-                                ? Maybe.Just(p.X - 2)
-                                : Maybe.Nothing<double>();
-                        },
-                        Maybe.Nothing<double>)).FilterMaybe();
-                DiscreteCellLoop<int> x = new DiscreteCellLoop<int>();
+                                ? Maybe.Some(p.X - 2)
+                                : Maybe.None;
+                        })).FilterMaybe();
+                CellLoop<int> x = new CellLoop<int>();
                 long myId = idSupply.Get();
-                DiscreteCell<bool> haveFocus = focus.Map(fId => fId == myId);
+                Cell<bool> haveFocus = focus.Map(fId => fId == myId);
                 Typeface typeface = new Typeface(new FontFamily("Helvetica"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
                 Stream<TextUpdate> sTextUpdate = sKey.Gate(haveFocus).Snapshot(text, x, (key, txt, xValue) =>
                  {
                      if (key is BackspaceKeyEvent)
                      {
-                         return xValue > 0 ? Maybe.Just(new TextUpdate(
+                         return xValue > 0 ? Maybe.Some(new TextUpdate(
                              txt.Substring(0, xValue - 1) +
                              txt.Substring(xValue),
-                             xValue - 1)) : Maybe.Nothing<TextUpdate>();
+                             xValue - 1)) : Maybe.None;
                      }
 
-                     StringKeyEvent stringKey = key as StringKeyEvent;
-                     if (stringKey == null)
+                     if (!(key is StringKeyEvent stringKey))
                      {
                          throw new InvalidOperationException("Unexpected type encountered for " + typeof(KeyEvent).FullName + ": " + key.GetType().FullName + ".");
                      }
 
                      string keyString = stringKey.String;
-                     return keyString == "\b" ? Maybe.Nothing<TextUpdate>() :
-                         Maybe.Just(new TextUpdate(
+                     return keyString == "\b" ? Maybe.None :
+                         Maybe.Some(new TextUpdate(
                              txt.Substring(0, xValue) +
                              keyString +
                              txt.Substring(xValue),
@@ -71,7 +69,7 @@ namespace Fridgets
                     .OrElse(sTextUpdate.Map(tu => tu.NewX))
                     .Hold(0));
                 text.Loop(sTextUpdate.Map(tu => tu.Txt).Hold(initText));
-                DiscreteCell<Size> desiredSize = text.Map(txt =>
+                Cell<Size> desiredSize = text.Map(txt =>
                 {
                     Size s = FontUtilities.MeasureString(txt, typeface, 13);
                     return new Size(s.Width + 14, s.Height + 10);
@@ -81,7 +79,7 @@ namespace Fridgets
                         x, haveFocus, size,
                         (txt, xValue, haveFocusValue, mSize) => new DrawableDelegate(d =>
                         {
-                            mSize.Match(
+                            mSize.MatchSome(
                                 sz =>
                                 {
                                     d.DrawRectangle(Brushes.White, new Pen(Brushes.Black, 1), new Rect(new Point(2, 2), new Size(sz.Width - 5, sz.Height - 5)));
@@ -93,8 +91,7 @@ namespace Fridgets
                                         double cursorX = tCursor.Width;
                                         d.DrawLine(new Pen(Brushes.Red, 1), new Point(4 + cursorX, 4), new Point(4 + cursorX, sz.Height - 5));
                                     }
-                                },
-                                () => { });
+                                });
                         })),
                     desiredSize,
                     sPressed.Map(_ => myId));
@@ -103,7 +100,7 @@ namespace Fridgets
             this.Text = text;
         }
 
-        public DiscreteCell<string> Text { get; }
+        public Cell<string> Text { get; }
 
         private class TextUpdate
         {

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using Priority_Queue;
 
@@ -12,60 +14,61 @@ namespace Sodium
     {
         private static readonly ThreadLocal<Transaction> LocalTransaction = new ThreadLocal<Transaction>();
 
-        internal readonly bool IsConstructing;
-
         // Coarse-grained lock that's held during the whole transaction.
         private static readonly object TransactionLock = new object();
 
-        private static Transaction currentTransaction;
+        private bool isElevated;
         internal static int InCallback;
         private static readonly List<Action> OnStartHooks = new List<Action>();
         private static bool runningOnStartHooks;
-        private readonly HashSet<Entry> entries = new HashSet<Entry>();
+        private List<Entry> entries = new List<Entry>();
         private readonly List<Action<Transaction>> sendQueue = new List<Action<Transaction>>();
-        private readonly List<Action> lastQueue = new List<Action>();
-        private readonly Dictionary<int, Action<Transaction>> postQueue = new Dictionary<int, Action<Transaction>>();
+        private List<Action> sampleQueue = new List<Action>();
+        private readonly Queue<Action> lastQueue = new Queue<Action>();
+        private readonly Queue<Action<Transaction>> postQueue;
+        private Dictionary<int, Action<Transaction>> splitQueue;
+        private readonly bool hasParentTransaction;
         internal readonly List<Node.Target> TargetsToActivate;
+        internal bool ActivatedTargets;
 
         private readonly SimplePriorityQueue<Entry, long> prioritizedQueue = new SimplePriorityQueue<Entry, long>();
 
         // True if we need to re-generate the priority queue.
         private bool toRegen;
 
-        internal bool ReachedClose;
-
-        internal Transaction(bool isConstructing)
+        internal Transaction()
+            : this(new Queue<Action<Transaction>>(), new Dictionary<int, Action<Transaction>>(), false)
         {
-            this.IsConstructing = isConstructing;
-            if (isConstructing)
-            {
-                this.TargetsToActivate = new List<Node.Target>();
-            }
+        }
+
+        private Transaction(
+            Queue<Action<Transaction>> postQueue,
+            Dictionary<int, Action<Transaction>> splitQueue,
+            bool hasParentTransaction = true)
+        {
+            this.postQueue = postQueue;
+            this.splitQueue = splitQueue;
+            this.hasParentTransaction = hasParentTransaction;
+            this.TargetsToActivate = new List<Node.Target>();
         }
 
         /// <summary>
         ///     Return whether or not there is a current transaction.
         /// </summary>
         /// <returns><code>true</code> if there is a current transaction, <code>false</code> otherwise.</returns>
-        internal static bool HasCurrentTransaction()
-        {
-            if (Monitor.TryEnter(TransactionLock))
-            {
-                try
-                {
-                    if (currentTransaction != null)
-                    {
-                        return true;
-                    }
-                }
-                finally
-                {
-                    Monitor.Exit(TransactionLock);
-                }
-            }
+        public static bool IsActive() => HasCurrentTransaction();
 
-            return LocalTransaction.Value != null;
-        }
+        /// <summary>
+        ///     Return whether or not there is a current transaction.
+        /// </summary>
+        /// <returns><code>true</code> if there is a current transaction, <code>false</code> otherwise.</returns>
+        internal static bool HasCurrentTransaction() => LocalTransaction.Value != null;
+
+        /// <summary>
+        ///     Return the current transaction or <code>null</code>.
+        /// </summary>
+        /// <returns>The current transaction or <code>null</code>.</returns>
+        internal static Transaction GetCurrentTransaction() => LocalTransaction.Value;
 
         /// <summary>
         ///     Execute the specified action inside a single transaction.
@@ -75,14 +78,14 @@ namespace Sodium
         ///     In most cases this is not needed, because all primitives will create their own transaction automatically.
         ///     It is useful for running multiple reactive operations atomically.
         /// </remarks>
-        public static void RunVoid(Action action)
-        {
-            Apply(_ =>
-            {
-                action();
-                return Unit.Value;
-            }, false);
-        }
+        public static void RunVoid(Action action) =>
+            Apply(
+                (_, __) =>
+                {
+                    action();
+                    return Unit.Value;
+                },
+                false);
 
         /// <summary>
         ///     Execute the specified function inside a single transaction.
@@ -94,172 +97,89 @@ namespace Sodium
         ///     In most cases this is not needed, because all primitives will create their own transaction automatically.
         ///     It is useful for running multiple reactive operations atomically.
         /// </remarks>
-        public static T Run<T>(Func<T> f)
-        {
-            return Apply(_ => f(), false);
-        }
+        public static T Run<T>(Func<T> f) => Apply((_, __) => f(), false);
 
-        /// <summary>
-        ///     Execute the specified action inside a single transaction.
-        ///     The action should only be used to construct FRP logic and may not close over any other FRP logic.
-        ///     This transaction will not block other transactions from running until it reaches the end of the transaction.
-        /// </summary>
-        /// <param name="f">The action to execute.</param>
-        /// <remarks>
-        ///     This method is most useful for creatung FRP logic which must be created within a Transaction (such as in a loop),
-        ///     but which should not block other transactions from running.  A use case for this is if the construction of FRP logic takes
-        ///     a significant amount of time, is being done asynchronously, and may be cancelled by another stream event.
-        /// </remarks>
-        public static void RunConstructVoid(Action action)
+        internal static T Apply<T>(Func<Transaction, bool, T> code, bool ensureElevated)
         {
-            Apply(_ =>
-            {
-                action();
-                return Unit.Value;
-            }, true);
-        }
+            Transaction transaction = LocalTransaction.Value;
 
-        /// <summary>
-        ///     Execute the specified function inside a single transaction.
-        ///     The function should only be used to construct FRP logic and may not close over any other FRP logic.
-        ///     This transaction will not block other transactions from running until it reaches the end of the transaction.
-        /// </summary>
-        /// <typeparam name="T">The type of the value returned.</typeparam>
-        /// <param name="f">The function to execute.</param>
-        /// <returns>The return value of <paramref name="f" />.</returns>
-        /// <remarks>
-        ///     This method is most useful for creatung FRP logic which must be created within a Transaction (such as in a loop),
-        ///     but which should not block other transactions from running.  A use case for this is if the construction of FRP logic takes
-        ///     a significant amount of time, is being done asynchronously, and may be cancelled by another stream event.
-        /// </remarks>
-        public static T RunConstruct<T>(Func<T> f)
-        {
-            return Apply(_ => f(), true);
-        }
-
-        private static T Apply<T>(Transaction transaction, bool createLocal, Func<Transaction, T> code)
-        {
+            T returnValue = default(T);
+            Exception exception = null;
             Transaction newTransaction = transaction;
             try
             {
+                bool createdNewTransaction = newTransaction == null;
                 if (newTransaction == null)
                 {
-                    newTransaction = createLocal ? new Transaction(true) : Start();
-                    SetCurrentTransaction(newTransaction, createLocal);
+                    newTransaction = new Transaction();
+
+                    LocalTransaction.Value = newTransaction;
                 }
 
-                return code(newTransaction);
+                if (ensureElevated)
+                {
+                    EnsureElevated(newTransaction);
+                }
+
+                returnValue = code(newTransaction, createdNewTransaction);
             }
-            finally
+            catch (Exception e)
+            {
+                exception = e;
+            }
+
+            try
             {
                 try
                 {
-                    if (transaction == null && newTransaction != null)
-                    {
-                        if (createLocal)
-                        {
-                            lock (TransactionLock)
-                            {
-                                RunStartHooks();
-
-                                foreach (Node.Target target in newTransaction.TargetsToActivate)
-                                {
-                                    target.IsActivated = true;
-                                }
-
-                                newTransaction.Close(true);
-                            }
-                        }
-                        else
-                        {
-                            newTransaction.Close(false);
-                        }
-                    }
-                }
-                finally
-                {
                     if (transaction == null)
                     {
-                        SetCurrentTransaction(null, createLocal);
+                        newTransaction?.Close();
                     }
+                }
+                catch (Exception e)
+                {
+                    if (exception == null)
+                    {
+                        throw;
+                    }
+
+                    throw new AggregateException(exception, e);
+                }
+
+                if (exception != null)
+                {
+                    ExceptionDispatchInfo.Capture(exception).Throw();
+                }
+
+                return returnValue;
+            }
+            finally
+            {
+                if (transaction == null)
+                {
+                    if (newTransaction != null && newTransaction.isElevated && !newTransaction.hasParentTransaction)
+                    {
+                        Monitor.Exit(TransactionLock);
+                    }
+
+                    LocalTransaction.Value = null;
                 }
             }
         }
 
-        internal static T Apply<T>(Func<Transaction, T> code, bool createLocal)
+        private static void EnsureElevated(Transaction transaction)
         {
-            Transaction localTransaction = null;
-
-            bool createLocalNow = false;
-            if (Monitor.TryEnter(TransactionLock))
+            if (transaction != null && !transaction.isElevated)
             {
-                try
+                transaction.isElevated = true;
+
+                if (!transaction.hasParentTransaction)
                 {
-                    //if lock was obtained and we have a regular transaction, use it
-                    if (currentTransaction != null)
-                    {
-                        return Apply(currentTransaction, false, code);
-                    }
-
-                    //check if we have a local transaction
-                    localTransaction = LocalTransaction.Value;
-
-                    //if lock was obtained and we have a local transaction, we will use it outside of the critical section
-                    if (localTransaction == null)
-                    {
-                        //if lock was obtained and we do not have either a regular transaction or a local transaction and we are looking to create a regular transaction,
-                        //create a regular transaction
-                        if (!createLocal)
-                        {
-                            return Apply(null, false, code);
-                        }
-                        //if lock was obtained and we do not have either a regular transaction or a local transaction and we are looking to create a local transaction,
-                        //create a local transaction as soon as we leave the critical section
-                        else
-                        {
-                            createLocalNow = true;
-                        }
-                    }
+                    Monitor.Enter(TransactionLock);
                 }
-                finally
-                {
-                    Monitor.Exit(TransactionLock);
-                }
-            }
-            //if lock was obtained and we do not have either a regular transaction or a local transaction and we are looking to create a local transaction,
-            //create a local transaction
-            if (createLocalNow)
-            {
-                return Apply(null, true, code);
-            }
 
-            //if lock was not obtained, we still need to check if we have a local transaction
-            //if lock was obtained and we found a local transaction, we can skip this check
-            if (localTransaction == null)
-            {
-                localTransaction = LocalTransaction.Value;
-            }
-
-            //if we have a local transaction, use it
-            if (localTransaction != null)
-            {
-                return Apply(localTransaction, true, code);
-            }
-
-            //if lock was obtained, we will have returned by now
-
-            //if lock was not obtained and we do not have either a regular transaction or a local transaction and we are looking to create a local transaction,
-            //create a local transaction
-            if (createLocal)
-            {
-                return Apply(null, true, code);
-            }
-
-            //if lock was not obtained and we do not have either a regular transaction or a local transaction and we are looking to create a regular transaction,
-            //create a regular transaction inside a critical section
-            lock (TransactionLock)
-            {
-                return Apply(null, false, code);
+                RunStartHooks();
             }
         }
 
@@ -298,13 +218,6 @@ namespace Sodium
             }
         }
 
-        private static Transaction Start()
-        {
-            RunStartHooks();
-
-            return new Transaction(false);
-        }
-
         internal void Send(Action<Transaction> action)
         {
             this.sendQueue.Add(action);
@@ -317,7 +230,13 @@ namespace Sodium
             {
                 this.prioritizedQueue.Enqueue(e, node.Rank);
             }
+
             this.entries.Add(e);
+        }
+
+        internal void Sample(Action action)
+        {
+            this.sampleQueue.Add(action);
         }
 
         /// <summary>
@@ -326,7 +245,18 @@ namespace Sodium
         /// <param name="action">The action to run after all prioritized actions.</param>
         internal void Last(Action action)
         {
-            this.lastQueue.Add(action);
+            this.lastQueue.Enqueue(action);
+        }
+
+        /// <summary>
+        ///     Add an action to run after all last actions.
+        /// </summary>
+        /// <param name="action">The action to run after all last actions.</param>
+        internal Unit Post(Action<Transaction> action)
+        {
+            this.postQueue.Enqueue(action);
+
+            return Unit.Value;
         }
 
         /// <summary>
@@ -334,25 +264,20 @@ namespace Sodium
         /// </summary>
         /// <param name="index">The order index in which to run the action.</param>
         /// <param name="action">The action to run after all last actions.</param>
-        internal Unit Post(int index, Action<Transaction> action)
+        internal Unit Split(int index, Action<Transaction> action)
         {
             // If an entry exists already, combine the old one with the new one.
             Action<Transaction> @new;
-            Action<Transaction> existing;
-            if (this.postQueue.TryGetValue(index, out existing))
+            if (this.splitQueue.TryGetValue(index, out Action<Transaction> existing))
             {
-                @new = trans =>
-                {
-                    existing(trans);
-                    action(trans);
-                };
+                @new = existing + action;
             }
             else
             {
                 @new = action;
             }
 
-            this.postQueue[index] = @new;
+            this.splitQueue[index] = @new;
 
             return Unit.Value;
         }
@@ -369,7 +294,21 @@ namespace Sodium
         {
             // -1 will mean it runs before anything split/deferred, and will run
             // outside a transaction context.
-            Apply(trans => trans.Post(-1, _ => action()), false);
+            Apply(
+                (trans, createdNewTransaction) =>
+                {
+                    if (createdNewTransaction)
+                    {
+                        action();
+                    }
+                    else
+                    {
+                        trans.Post(_ => action());
+                    }
+
+                    return Unit.Value;
+                },
+                false);
         }
 
         internal void SetNeedsRegenerating()
@@ -387,104 +326,121 @@ namespace Sodium
                 this.prioritizedQueue.Clear();
                 lock (Node.NodeRanksLock)
                 {
+                    List<Entry> newEntries = new List<Entry>(this.entries.Count);
                     foreach (Entry e in this.entries)
                     {
-                        this.prioritizedQueue.Enqueue(e, e.Node.Rank);
+                        if (!e.IsRemoved)
+                        {
+                            newEntries.Add(e);
+                            this.prioritizedQueue.Enqueue(e, e.Node.Rank);
+                        }
                     }
+
+                    this.entries = newEntries;
                 }
             }
         }
 
-        internal void Close(bool usingLocal)
+        internal void Close()
         {
+            EnsureElevated(this);
+
+            foreach (Node.Target target in this.TargetsToActivate)
+            {
+                target.IsActivated = true;
+            }
+
+            this.ActivatedTargets = true;
+
             // ReSharper disable once ForCanBeConvertedToForeach
             for (int i = 0; i < this.sendQueue.Count; i++)
             {
                 this.sendQueue[i](this);
             }
+
             this.sendQueue.Clear();
 
-            this.ReachedClose = true;
-
-            this.CheckRegen();
-
-            while (true)
+            while (this.prioritizedQueue.Count > 0 || this.sampleQueue.Count > 0)
             {
-                if (this.prioritizedQueue.Count < 1)
+                while (this.prioritizedQueue.Count > 0)
                 {
-                    break;
+                    this.CheckRegen();
+
+                    Entry e = this.prioritizedQueue.Dequeue();
+                    e.IsRemoved = true;
+                    e.Action(this);
                 }
 
-                Entry e = this.prioritizedQueue.Dequeue();
-                this.entries.Remove(e);
-                e.Action(this);
-
-                this.CheckRegen();
-            }
-
-            // ReSharper disable once ForCanBeConvertedToForeach
-            for (int i = 0; i < this.lastQueue.Count; i++)
-            {
-                this.lastQueue[i]();
-            }
-            this.lastQueue.Clear();
-
-            foreach (KeyValuePair<int, Action<Transaction>> pair in this.postQueue)
-            {
-                try
+                List<Action> sq = this.sampleQueue;
+                this.sampleQueue = new List<Action>();
+                foreach (Action s in sq)
                 {
-                    if (pair.Key < 0)
+                    s();
+                }
+            }
+
+            while (this.lastQueue.Count > 0)
+            {
+                this.lastQueue.Dequeue()();
+            }
+
+            if (!this.hasParentTransaction)
+            {
+                void ExecuteInNewTransaction(Action<Transaction> action, bool runStartHooks)
+                {
+                    try
                     {
-                        SetCurrentTransaction(null, usingLocal);
-                        pair.Value(null);
-                    }
-                    else
-                    {
-                        Transaction transaction = new Transaction(false);
-                        SetCurrentTransaction(transaction, usingLocal);
+                        Transaction transaction = new Transaction(this.postQueue, this.splitQueue);
+
+                        if (!runStartHooks)
+                        {
+                            // this will ensure we don't run start hooks
+                            transaction.isElevated = true;
+                        }
+
+                        LocalTransaction.Value = transaction;
                         try
                         {
-                            pair.Value(transaction);
+                            action(transaction);
                         }
                         finally
                         {
-                            transaction.Close(usingLocal);
+                            transaction.Close();
                         }
                     }
+                    finally
+                    {
+                        LocalTransaction.Value = this;
+                    }
                 }
-                finally
-                {
-                    SetCurrentTransaction(this, usingLocal);
-                }
-            }
-            this.postQueue.Clear();
-        }
 
-        private static void SetCurrentTransaction(Transaction transaction, bool usingLocal)
-        {
-            if (usingLocal)
-            {
-                LocalTransaction.Value = transaction;
-            }
-            else
-            {
-                currentTransaction = transaction;
+                while (this.postQueue.Count > 0 || this.splitQueue.Count > 0)
+                {
+                    while (this.postQueue.Count > 0)
+                    {
+                        ExecuteInNewTransaction(this.postQueue.Dequeue(), true);
+                    }
+
+                    Dictionary<int, Action<Transaction>> sq = this.splitQueue;
+                    this.splitQueue = new Dictionary<int, Action<Transaction>>();
+                    foreach (int n in sq.Keys.OrderBy(n => n))
+                    {
+                        ExecuteInNewTransaction(sq[n], false);
+                    }
+                }
             }
         }
 
         private class Entry
         {
-            private static long nextSeq;
-
             public readonly Node Node;
             public readonly Action<Transaction> Action;
-            private readonly long seq;
+            public bool IsRemoved;
 
             public Entry(Node node, Action<Transaction> action)
             {
                 this.Node = node;
                 this.Action = action;
-                this.seq = nextSeq++;
             }
         }
     }

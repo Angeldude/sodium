@@ -4,14 +4,14 @@ using Sodium;
 
 namespace Patterns
 {
-    internal class Program
+    internal static class Program
     {
         private static void Main()
         {
             Dictionary<char, IExample> actions = new Dictionary<char, IExample>
             {
-                {'a', new CalmExample()},
-                {'b', new Pause()}
+                { 'a', new CalmExample() },
+                { 'b', new Pause() }
             };
 
             foreach (KeyValuePair<char, IExample> p in actions)
@@ -24,8 +24,7 @@ namespace Patterns
                 Console.WriteLine();
                 Console.Write("Select an example to run: ");
                 ConsoleKeyInfo c = Console.ReadKey();
-                IExample example;
-                if (actions.TryGetValue(c.KeyChar, out example))
+                if (actions.TryGetValue(c.KeyChar, out IExample example))
                 {
                     Console.WriteLine();
                     Console.WriteLine();
@@ -49,7 +48,7 @@ namespace Patterns
 
             public void Run()
             {
-                DiscreteCellSink<int> sa = new DiscreteCellSink<int>(1);
+                CellSink<int> sa = new CellSink<int>(1);
                 IListener l = Calm(sa).Listen(Console.WriteLine);
                 sa.Send(1);
                 sa.Send(2);
@@ -60,24 +59,24 @@ namespace Patterns
                 l.Unlisten();
             }
 
-            private static Stream<T> Calm<T>(Stream<T> sA, Lazy<IMaybe<T>> init)
+            private static Stream<T> Calm<T>(Stream<T> sA, Lazy<Maybe<T>> init)
             {
                 return sA.CollectLazy(init, (a, lastA) =>
                 {
-                    IMaybe<T> ma = Maybe.Just(a);
-                    return ma.Equals(lastA) ? Tuple.Create(Maybe.Nothing<T>(), lastA) : Tuple.Create(ma, ma);
+                    Maybe<T> ma = Maybe.Some(a);
+                    return ma.Equals(lastA) ? (ReturnValue: Maybe.None, State: lastA) : (ReturnValue: ma, State: ma);
                 }).FilterMaybe();
             }
 
             private static Stream<T> Calm<T>(Stream<T> sA)
             {
-                return Calm(sA, new Lazy<IMaybe<T>>(Maybe.Nothing<T>));
+                return Calm(sA, new Lazy<Maybe<T>>(() => Maybe.None));
             }
 
-            private static DiscreteCell<T> Calm<T>(DiscreteCell<T> a)
+            private static Cell<T> Calm<T>(Cell<T> a)
             {
-                Lazy<T> initA = a.Cell.SampleLazy();
-                Lazy<IMaybe<T>> mInitA = initA.Map(Maybe.Just);
+                Lazy<T> initA = a.SampleLazy();
+                Lazy<Maybe<T>> mInitA = initA.Map(Maybe.Some);
                 return Calm(a.Updates, mInitA).HoldLazy(initA);
             }
         }
@@ -88,10 +87,10 @@ namespace Patterns
 
             public void Run()
             {
-                DiscreteCellSink<double> mainClock = new DiscreteCellSink<double>(0.0);
+                CellSink<double> mainClock = new CellSink<double>(0.0);
                 StreamSink<Unit> sPause = new StreamSink<Unit>();
                 StreamSink<Unit> sResume = new StreamSink<Unit>();
-                DiscreteCell<double> gameClock = PausableClock(sPause, sResume, mainClock);
+                Cell<double> gameClock = PausableClock(sPause, sResume, mainClock);
                 IListener l = mainClock.Lift(gameClock, (m, g) => "main=" + m + " game=" + g).Listen(Console.WriteLine);
                 mainClock.Send(1.0);
                 mainClock.Send(2.0);
@@ -105,13 +104,13 @@ namespace Patterns
                 l.Unlisten();
             }
 
-            private static DiscreteCell<double> PausableClock(Stream<Unit> sPause, Stream<Unit> sResume, DiscreteCell<double> clock)
+            private static Cell<double> PausableClock(Stream<Unit> sPause, Stream<Unit> sResume, Cell<double> clock)
             {
-                DiscreteCell<IMaybe<double>> pauseTime = sPause.Snapshot(clock, (_, t) => Maybe.Just(t)).OrElse(sResume.Map(_ => Maybe.Nothing<double>())).Hold(Maybe.Nothing<double>());
-                DiscreteCell<double> lostTime = sResume.Accum(0.0, (_, total) =>
+                Cell<Maybe<double>> pauseTime = sPause.Snapshot(clock, (_, t) => Maybe.Some(t)).OrElse(sResume.Map(_ => Maybe<double>.None)).Hold(Maybe.None);
+                Cell<double> lostTime = sResume.Accum(0.0, (_, total) =>
                 {
-                    double tPause = pauseTime.Cell.Sample().Match(v => v, () => 0);
-                    double now = clock.Cell.Sample();
+                    double tPause = pauseTime.Sample().Match(v => v, () => 0);
+                    double now = clock.Sample();
                     return total + (now - tPause);
                 });
                 return pauseTime.Lift(clock, lostTime, (otPause, tClk, tLost) => otPause.Match(v => v, () => tClk) - tLost);

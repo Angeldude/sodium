@@ -18,13 +18,13 @@ namespace Lookup
             Transaction.RunVoid(() =>
             {
                 STextBox word = new STextBox(string.Empty);
-                DiscreteCellLoop<bool> enabled = new DiscreteCellLoop<bool>();
+                CellLoop<bool> enabled = new CellLoop<bool>();
                 SButton button = new SButton(enabled) { Content = "look up" };
                 Stream<string> sWord = button.SClicked.Snapshot(word.Text);
-                IsBusy<string, IMaybe<string>> ib = new IsBusy<string, IMaybe<string>>(Lookup, sWord);
+                IsBusy<string, Maybe<string>> ib = new IsBusy<string, Maybe<string>>(Lookup, sWord);
                 Stream<string> sDefinition = ib.SOut.Map(o => o.Match(v => v, () => "ERROR!"));
-                DiscreteCell<string> definition = sDefinition.Hold(string.Empty);
-                DiscreteCell<string> output = definition.Lift(ib.Busy, (def, bsy) => bsy ? "Looking up..." : def);
+                Cell<string> definition = sDefinition.Hold(string.Empty);
+                Cell<string> output = definition.Lift(ib.Busy, (def, bsy) => bsy ? "Looking up..." : def);
                 enabled.Loop(ib.Busy.Map(b => !b));
                 STextBox outputArea = new STextBox(output.Values, string.Empty, enabled) { TextWrapping = TextWrapping.Wrap, AcceptsReturn = true };
                 this.TextBoxPlaceholder.Child = word;
@@ -33,15 +33,15 @@ namespace Lookup
             });
         }
 
-        public static Stream<IMaybe<string>> Lookup(Stream<string> sWord)
+        public static Stream<Maybe<string>> Lookup(Stream<string> sWord)
         {
-            StreamSink<IMaybe<string>> sDefinition = new StreamSink<IMaybe<string>>();
+            StreamSink<Maybe<string>> sDefinition = new StreamSink<Maybe<string>>();
             IListener listener = sWord.Listen(wrd =>
             {
                 Task.Run(() =>
                 {
                     //System.out.println("look up " + wrd);
-                    IMaybe<string> def = Maybe.Nothing<string>();
+                    Maybe<string> def = Maybe.None;
                     try
                     {
                         Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -74,7 +74,7 @@ namespace Lookup
                                     }
                                     b.AppendLine(l);
                                 }
-                                def = Maybe.Just(b.ToString());
+                                def = Maybe.Some(b.ToString());
                             }
                             else
                             {
@@ -116,7 +116,7 @@ namespace Lookup
             }
 
             public Stream<TResult> SOut { get; }
-            public DiscreteCell<bool> Busy { get; }
+            public Cell<bool> Busy { get; }
         }
     }
 }
