@@ -5,7 +5,8 @@ Reactive Programming efforts, as well as a lot of personal experience. Enjoy.
 
 Status:
   C++ - complete, but the memory management is not quite right yet - in separate sodium-cxx repository
-  C# - complete
+  C# - complete (source in dotnet folder, binaries in SodiumFRP NuGet package)
+  F# - complete (source in dotnet folder, binaries in SodiumFRP.FSharp NuGet package)
   Java - complete
   Kotlin - complete - in separate sodium-kotlin repository
   Scala - complete
@@ -13,7 +14,7 @@ Status:
 
   Haskell - deprecated in favour of Heinrich Apfelmus's Reactive Banana
   Embedded-C - just an experiment
-  Rust - got nowhere with it yet
+  Rust - complete - in separate sodium-rust repository
 
 Got a question about how to use Sodium? Go to Sodium user forum:
   http://sodium.nz/
